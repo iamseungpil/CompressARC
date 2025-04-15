@@ -1,0 +1,74 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Single Task",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/run_all.py",
+            "args": [
+                "--split", "training",
+                "--output-dir", "results/",
+                "--num-steps", "10",
+                "--iterations-per-step", "20",
+                "--use-multi-latent"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Train Model",
+            "type": "python",
+            "request": "launch",
+            "module": "training.llama_train",
+            "args": [
+                "--task-id", "example_task",
+                "--output-dir", "training_output/",
+                "--num-steps", "10",
+                "--iterations-per-step", "20"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Run All Tasks (Parallel)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/run_all.py",
+            "args": [
+                "--split", "training",
+                "--output-dir", "results/",
+                "--parallel",
+                "--gpu-ids", "0",
+                "--num-steps", "10",
+                "--iterations-per-step", "20",
+                "--use-multi-latent"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Analyze Example",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/analyze_example.py",
+            "args": [
+                "--task-id", "example_task" 
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Generate Submission",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/generate_submission.py",
+            "args": [
+                "--results-dir", "results/test/",
+                "--output-file", "submission.json"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
