@@ -9,7 +9,7 @@ from utils.grid_preprocessing import format_grid, format_examples
 
 class LlamaARCSolver:
     """
-    Llama 기반 ARC 문제 해결 모델
+    Llama 기반 ARC 문제 해결 모델 - latent 벡터를 직접 최적화하는 방식
     """
     def __init__(self, model_name="barc0/Llama-3.1-ARC-Potpourri-Transduction-8B", device=None):
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -19,88 +19,66 @@ class LlamaARCSolver:
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
-        # 인코딩을 위한 파라미터 (파인튜닝 가능)
-        self.encoder_projector = nn.Linear(768, 768).to(self.device)  # 임베딩 차원에 맞게 조정 필요
+        # 모델의 hidden size 가져오기
+        self.hidden_size = self.model.config.hidden_size
         
         # Random network 초기화
-        self.random_network = RandomNetwork(hidden_size=768).to(self.device)
+        self.random_network = RandomNetwork(hidden_size=self.hidden_size).to(self.device)
+        
+        # task 별 latent 벡터는 externally 관리 (optimize_latent 메소드에서 처리)
+        self.latent = None
     
-    def encode_grid(self, grid):
-        """ARC grid를 인코딩하여 벡터 표현으로 변환"""
-        # Grid를 토큰화
-        tokenized_grid = tokenize_grid(grid, self.tokenizer).to(self.device)
+    def init_latent(self, std_dev=0.01):
+        """
+        latent 벡터 초기화 (task별로 호출)
         
-        # Llama의 임베딩 추출
-        with torch.no_grad():  # 기본 임베딩은 고정
-            embeddings = self.model.get_input_embeddings()(tokenized_grid)
+        Args:
+            std_dev: 초기화를 위한 표준편차
+        """
+        # 랜덤 초기화된 latent 벡터 생성 (requires_grad=True로 설정하여 최적화 대상으로 지정)
+        latent = torch.randn(1, self.hidden_size, device=self.device) * std_dev
+        latent = nn.Parameter(latent, requires_grad=True)
         
-        # 임베딩을 인코더로 처리 (파인튜닝 가능 부분)
-        encoded = self.encoder_projector(embeddings)
-        
-        return encoded
+        return latent
     
-    def calculate_kl_divergence(self, encoded_representation):
-        """Random network와의 KL divergence 계산"""
+    def calculate_kl_divergence(self, latent):
+        """
+        Random network와의 KL divergence 계산
+        
+        Args:
+            latent: 최적화 중인 latent 벡터
+        """
         # Random network 출력
-        random_output = self.random_network(encoded_representation)
+        random_output = self.random_network(latent)
         
         # KL divergence 계산
         kl_div = F.kl_div(
-            F.log_softmax(encoded_representation, dim=-1),
+            F.log_softmax(latent, dim=-1),
             F.softmax(random_output, dim=-1),
             reduction='batchmean'
         )
         
         return kl_div
     
-    def solve(self, input_grid, examples=None):
+    def optimize_latent(self, input_grid, target_grid, examples=None, latent=None, optimizer=None, num_iterations=100):
         """
-        ARC 문제 해결
-        
-        Args:
-            input_grid: 해결할 입력 그리드
-            examples: 입출력 예제 쌍 (옵션)
-        """
-        # 입력 그리드 토큰화
-        example_text = format_examples(examples) if examples else ""
-        input_text = example_text + "Input:\n" + format_grid(input_grid) + "\nOutput:\n"
-        
-        # 토큰화
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
-        
-        # 입력 인코딩
-        encoded = self.encode_grid(input_grid)
-        
-        # KL divergence 계산
-        kl_div = self.calculate_kl_divergence(encoded)
-        
-        # Llama 모델로 생성
-        outputs = self.model.generate(
-            inputs.input_ids,
-            max_new_tokens=512,
-            temperature=0.7
-        )
-        
-        # 출력을 그리드로 디코딩
-        output_grid = decode_grid_from_tokens(
-            outputs[0][inputs.input_ids.shape[1]:], 
-            self.tokenizer
-        )
-        
-        return output_grid, kl_div
-    
-    def train_step(self, input_grid, target_grid, examples=None, optimizer=None):
-        """
-        훈련 단계 수행
+        latent 벡터 최적화를 통한 ARC 문제 해결
         
         Args:
             input_grid: 입력 그리드
             target_grid: 목표 출력 그리드
             examples: 추가 예제 쌍
-            optimizer: 옵티마이저
+            latent: 기존 latent 벡터 (None이면 새로 초기화)
+            optimizer: 옵티마이저 (None이면 새로 생성)
+            num_iterations: 최적화 반복 횟수
         """
+        # latent 벡터 초기화 (없는 경우)
+        if latent is None:
+            latent = self.init_latent()
+        
+        # 옵티마이저 초기화 (없는 경우)
         if optimizer is None:
-            raise ValueError("Optimizer must be provided for training")
+            optimizer = torch.optim.Adam([latent], lr=0.01)
         
         # 입력 처리
         example_text = format_examples(examples) if examples else ""
@@ -111,41 +89,130 @@ class LlamaARCSolver:
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
         targets = self.tokenizer(target_text, return_tensors="pt").to(self.device)
         
-        # 입력 인코딩
-        encoded = self.encode_grid(input_grid)
+        # 최적화 루프
+        losses = []
+        best_loss = float('inf')
+        best_solution = None
         
-        # KL divergence 계산
-        kl_div = self.calculate_kl_divergence(encoded)
-        
-        # 모델 출력
-        outputs = self.model(input_ids=inputs.input_ids, labels=targets.input_ids)
-        
-        # 손실 계산
-        reconstruction_loss = outputs.loss
-        total_loss = reconstruction_loss + 0.1 * kl_div  # beta 가중치 조정 가능
-        
-        # 역전파 및 옵티마이저 스텝
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
-        
-        # 현재 솔루션 생성 (평가용)
-        with torch.no_grad():
-            gen_outputs = self.model.generate(
-                inputs.input_ids,
-                max_new_tokens=512,
-                temperature=0.0  # 평가시 결정적 출력
+        for i in range(num_iterations):
+            # KL divergence 계산
+            kl_div = self.calculate_kl_divergence(latent)
+            
+            # latent 벡터를 사용하여 생성
+            # cross-attention 또는 input injection 방식으로 latent를 모델에 전달
+            # 여기서는 간단히 입력 임베딩에 latent를 더하는 방식으로 구현
+            
+            # 입력 임베딩 계산
+            inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
+            
+            # latent를 임베딩에 주입 (첫 토큰에만 적용)
+            inputs_embeds[:, 0, :] += latent
+            
+            # 모델 출력
+            outputs = self.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=inputs.attention_mask,
+                labels=targets.input_ids
             )
+            
+            # 손실 계산
+            reconstruction_loss = outputs.loss
+            beta = 0.1  # KL divergence 가중치
+            total_loss = reconstruction_loss + beta * kl_div
+            
+            # 역전파 및 옵티마이저 스텝
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+            
+            # 손실 기록
+            loss_value = total_loss.item()
+            losses.append(loss_value)
+            
+            # 현재 최선의 솔루션 저장
+            if reconstruction_loss.item() < best_loss:
+                best_loss = reconstruction_loss.item()
+                
+                # 현재 latent로 솔루션 생성
+                with torch.no_grad():
+                    inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
+                    inputs_embeds[:, 0, :] += latent
+                    
+                    gen_outputs = self.model.generate(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=inputs.attention_mask,
+                        max_new_tokens=512,
+                        temperature=0.0  # 결정적 출력
+                    )
+                
+                best_solution = decode_grid_from_tokens(
+                    gen_outputs[0][inputs.input_ids.shape[1]:], 
+                    self.tokenizer
+                )
         
-        solution_grid = decode_grid_from_tokens(
-            gen_outputs[0][inputs.input_ids.shape[1]:], 
-            self.tokenizer
-        )
-        
+        # 최종 메트릭
         metrics = {
             'total_loss': total_loss.item(),
             'reconstruction_loss': reconstruction_loss.item(),
-            'kl_divergence': kl_div.item()
+            'kl_divergence': kl_div.item(),
+            'loss_history': losses
         }
         
-        return solution_grid, metrics
+        return best_solution, metrics, latent
+    
+    def solve(self, input_grid, examples=None, latent=None, num_iterations=100):
+        """
+        ARC 문제 해결 (latent 최적화 방식)
+        
+        Args:
+            input_grid: 해결할 입력 그리드
+            examples: 입출력 예제 쌍 (옵션)
+            latent: 사전 최적화된 latent 벡터 (None이면 새로 초기화)
+            num_iterations: 최적화 반복 횟수
+        """
+        # latent가 없으면 초기화
+        if latent is None:
+            latent = self.init_latent()
+        
+        # 예제로부터 latent 최적화
+        if examples:
+            optimizer = torch.optim.Adam([latent], lr=0.01)
+            for input_ex, target_ex in examples:
+                _, _, latent = self.optimize_latent(
+                    input_ex, target_ex, 
+                    examples=examples, 
+                    latent=latent, 
+                    optimizer=optimizer,
+                    num_iterations=num_iterations
+                )
+        
+        # 최적화된 latent로 테스트 입력에 대한 출력 생성
+        example_text = format_examples(examples) if examples else ""
+        input_text = example_text + "Input:\n" + format_grid(input_grid) + "\nOutput:\n"
+        
+        # 토큰화
+        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
+        
+        # KL divergence 계산
+        kl_div = self.calculate_kl_divergence(latent)
+        
+        # 입력 임베딩에 latent 주입
+        with torch.no_grad():
+            inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
+            inputs_embeds[:, 0, :] += latent
+            
+            # 출력 생성
+            outputs = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=512,
+                temperature=0.7
+            )
+        
+        # 출력을 그리드로 디코딩
+        output_grid = decode_grid_from_tokens(
+            outputs[0][inputs.input_ids.shape[1]:], 
+            self.tokenizer
+        )
+        
+        return output_grid, kl_div.item(), latent

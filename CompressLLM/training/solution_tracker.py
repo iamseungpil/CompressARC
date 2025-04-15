@@ -12,12 +12,13 @@ class SolutionTracker:
         self.metrics_history = {}    # 각 스텝별 성능 지표
         self.best_step = None
         self.best_solution = None
+        self.best_latent = None      # 최적의 latent 벡터 저장
         
         # KL 및 재구성 오류 커브 추적 (분석용)
         self.kl_curves = {}
         self.reconstruction_error_curve = []
         
-    def log_solution(self, step, solution, metrics):
+    def log_solution(self, step, solution, metrics, latent=None):
         """훈련 단계에서 생성된 솔루션과 성능 지표 기록"""
         self.solutions_history[step] = solution
         self.metrics_history[step] = metrics
@@ -33,10 +34,17 @@ class SolutionTracker:
         if self.best_step is None or metrics['reconstruction_loss'] < self.metrics_history.get(self.best_step, {}).get('reconstruction_loss', float('inf')):
             self.best_step = step
             self.best_solution = solution
+            
+            # latent 벡터 저장 (있는 경우)
+            if latent is not None:
+                if isinstance(latent, torch.nn.Parameter):
+                    self.best_latent = latent.detach().clone()
+                else:
+                    self.best_latent = latent.clone() if isinstance(latent, torch.Tensor) else latent
     
     def get_best_solution(self):
         """최적의 솔루션 반환"""
-        return self.best_solution, self.best_step
+        return self.best_solution, self.best_step, self.best_latent
     
     def get_metrics_history(self):
         """메트릭 히스토리 반환 (시각화용)"""
