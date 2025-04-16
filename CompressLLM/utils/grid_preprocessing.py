@@ -9,8 +9,26 @@ def load_tasks(split="training"):
     Args:
         split: 데이터 분할 (training/evaluation/test)
     """
-    # 데이터셋 경로
-    dataset_dir = os.path.join("..", "dataset")
+    # 데이터셋 경로 시도 (여러 가능성 조사)
+    possible_dataset_paths = [
+        os.path.join(os.getcwd(), "dataset"),               # 현재 디렉토리의 dataset
+        os.path.join(os.path.dirname(os.getcwd()), "dataset"),  # 상위 디렉토리의 dataset
+        os.path.join("dataset"),                           # 상대경로
+        os.path.join(os.path.dirname(__file__), "..", "..", "dataset")  # 프로젝트 루트의 dataset
+    ]
+    
+    dataset_dir = None
+    for path in possible_dataset_paths:
+        if os.path.exists(path):
+            dataset_dir = path
+            break
+    
+    if dataset_dir is None:
+        # 경로를 찾지 못하면 현재 디렉토리에 dataset 폴더 생성
+        dataset_dir = os.path.join(os.getcwd(), "dataset")
+        os.makedirs(dataset_dir, exist_ok=True)
+        print(f"Created dataset directory at {dataset_dir}")
+        print("Please place ARC-AGI json files in this directory.")
     
     # 태스크 파일 로드
     challenges_file = os.path.join(dataset_dir, f"arc-agi_{split}_challenges.json")
@@ -18,7 +36,7 @@ def load_tasks(split="training"):
     
     # 파일이 존재하지 않으면 에러
     if not os.path.exists(challenges_file):
-        raise FileNotFoundError(f"Challenges file not found: {challenges_file}")
+        raise FileNotFoundError(f"Challenges file not found: {challenges_file}\nPlease download the ARC-AGI dataset and place it in {dataset_dir}")
     
     # 챌린지 로드
     with open(challenges_file, 'r') as f:

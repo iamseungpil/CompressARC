@@ -54,14 +54,31 @@ class DirectionalProcessor(nn.Module):
         batch, height, width, channels = grid.shape
         result = torch.zeros_like(grid)
         
-        # 유효한 인덱스 계산
-        valid_h_src = slice(max(0, -dy), min(height, height - dy))
-        valid_w_src = slice(max(0, -dx), min(width, width - dx))
-        valid_h_dst = slice(max(0, dy), min(height, height + dy))
-        valid_w_dst = slice(max(0, dx), min(width, width + dx))
-        
-        # 시프트 적용
-        result[:, valid_h_dst, valid_w_dst, :] = grid[:, valid_h_src, valid_w_src, :]
+        try:
+            # 소스 및 대상 인덱스 계산
+            if dy <= 0:  # 위로 이동 또는 그대로
+                src_y_start, src_y_end = 0, height + dy
+                dst_y_start, dst_y_end = -dy, height
+            else:  # 아래로 이동
+                src_y_start, src_y_end = dy, height
+                dst_y_start, dst_y_end = 0, height - dy
+            
+            if dx <= 0:  # 왼쪽으로 이동 또는 그대로
+                src_x_start, src_x_end = 0, width + dx
+                dst_x_start, dst_x_end = -dx, width
+            else:  # 오른쪽으로 이동
+                src_x_start, src_x_end = dx, width
+                dst_x_start, dst_x_end = 0, width - dx
+            
+            # 유효한 인덱스 확인 및 시프트 적용
+            if src_y_end > src_y_start and src_x_end > src_x_start:
+                result[:, dst_y_start:dst_y_end, dst_x_start:dst_x_end, :] = \
+                    grid[:, src_y_start:src_y_end, src_x_start:src_x_end, :]
+                
+        except Exception as e:
+            print(f"Error in shift_grid (dx={dx}, dy={dy}): {e}")
+            # 오류 발생 시 원본 그리드 그대로 반환
+            return grid
         
         return result
 
@@ -83,31 +100,36 @@ class CumMaxLayer(nn.Module):
             mask: 마스크 (선택 사항)
         """
         batch, height, width, channels = grid.shape
-        result = torch.zeros_like(grid)
         
-        # x 방향 누적 최대값
-        x_cummax = torch.zeros_like(grid)
-        for i in range(width):
-            if i == 0:
-                x_cummax[:, :, i, :] = grid[:, :, i, :]
-            else:
-                x_cummax[:, :, i, :] = torch.maximum(x_cummax[:, :, i-1, :], grid[:, :, i, :])
-        
-        # y 방향 누적 최대값
-        y_cummax = torch.zeros_like(grid)
-        for i in range(height):
-            if i == 0:
-                y_cummax[:, i, :, :] = grid[:, i, :, :]
-            else:
-                y_cummax[:, i, :, :] = torch.maximum(y_cummax[:, i-1, :, :], grid[:, i, :, :])
-        
-        # 결과 결합
-        result = torch.cat([x_cummax, y_cummax], dim=-1)
-        result = self.projection(result)
-        
-        # 마스크 적용 (있는 경우)
-        if mask is not None:
-            result = result * mask
+        try:
+            # x 방향 누적 최대값
+            x_cummax = torch.zeros_like(grid)
+            for i in range(width):
+                if i == 0:
+                    x_cummax[:, :, i, :] = grid[:, :, i, :]
+                else:
+                    x_cummax[:, :, i, :] = torch.maximum(x_cummax[:, :, i-1, :], grid[:, :, i, :])
+            
+            # y 방향 누적 최대값
+            y_cummax = torch.zeros_like(grid)
+            for i in range(height):
+                if i == 0:
+                    y_cummax[:, i, :, :] = grid[:, i, :, :]
+                else:
+                    y_cummax[:, i, :, :] = torch.maximum(y_cummax[:, i-1, :, :], grid[:, i, :, :])
+            
+            # 결과 결합
+            combined = torch.cat([x_cummax, y_cummax], dim=-1)
+            result = self.projection(combined)
+            
+            # 마스크 적용 (있는 경우)
+            if mask is not None:
+                result = result * mask
+                
+        except Exception as e:
+            print(f"Error in CumMaxLayer.forward: {e}")
+            # 오류 발생 시 원본 그리드 그대로 반환
+            result = grid
         
         return result
 
@@ -119,6 +141,9 @@ class ShiftLayer(nn.Module):
         super().__init__()
         self.channels = channels
         self.projection = nn.Linear(channels * 4, channels)
+        
+        # 방향별 시프트 처리를 위한 프로세서 초기화 (메모리 누수 방지)
+        self.direction_processor = DirectionalProcessor(channels)
     
     def forward(self, grid, mask=None):
         """
@@ -133,18 +158,24 @@ class ShiftLayer(nn.Module):
         # 4개 방향 시프트 (상, 우, 하, 좌)
         directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
         
-        shifted_grids = []
-        for dx, dy in directions:
-            processor = DirectionalProcessor(self.channels)
-            shifted = processor._shift_grid(grid, dx, dy)
-            shifted_grids.append(shifted)
-        
-        # 모든 시프트 결과 결합
-        combined = torch.cat(shifted_grids, dim=-1)
-        result = self.projection(combined)
-        
-        # 마스크 적용 (있는 경우)
-        if mask is not None:
-            result = result * mask
+        try:
+            shifted_grids = []
+            for dx, dy in directions:
+                # 기존에 생성한 direction_processor 사용
+                shifted = self.direction_processor._shift_grid(grid, dx, dy)
+                shifted_grids.append(shifted)
+            
+            # 모든 시프트 결과 결합
+            combined = torch.cat(shifted_grids, dim=-1)
+            result = self.projection(combined)
+            
+            # 마스크 적용 (있는 경우)
+            if mask is not None:
+                result = result * mask
+                
+        except Exception as e:
+            print(f"Error in ShiftLayer.forward: {e}")
+            # 오류 발생 시 원본 그리드 그대로 반환
+            result = grid
         
         return result

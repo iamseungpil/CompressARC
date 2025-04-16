@@ -144,68 +144,105 @@ class LlamaARCSolver:
         - 방향성 처리
         - 정규화
         """
-        # 다중 텐서 잠재 벡터 가져오기
-        latent_dict = {
-            tuple(dims): self.multitensor_latent.get_latent(dims)
-            for dims in self.multitensor_latent.dims_list
-        }
-        
-        # 1. 상향 공유 (하위->상위 텐서)
-        shared_up = share_information(latent_dict, direction='up')
-        
-        # 각 텐서에 가중치 적용
-        for dims_key in shared_up:
-            dims_str = str(dims_key)
-            shared_up[dims_key] = self.share_up_weights[dims_str](shared_up[dims_key])
-        
-        # 2. 방향성 처리 (방향 차원이 있는 텐서만)
-        for dims_key in shared_up:
-            dims = list(dims_key)
-            if dims[2] == 1:  # 방향 차원이 있는 경우
-                # 방향성 처리 적용
-                shared_up[dims_key] = F.gelu(shared_up[dims_key])
-        
-        # 3. 하향 공유 (상위->하위 텐서)
-        shared_down = share_information(shared_up, direction='down')
-        
-        # 각 텐서에 가중치 적용
-        for dims_key in shared_down:
-            dims_str = str(dims_key)
-            shared_down[dims_key] = self.share_down_weights[dims_str](shared_down[dims_key])
-        
-        # 4. 정규화
-        normalized = multitensor_normalize(shared_down)
-        
-        return normalized
+        try:
+            # 다중 텐서 잠재 벡터 가져오기
+            latent_dict = {
+                tuple(dims): self.multitensor_latent.get_latent(dims)
+                for dims in self.multitensor_latent.dims_list
+            }
+            
+            # 1. 상향 공유 (하위->상위 텐서)
+            shared_up = share_information(latent_dict, direction='up')
+            
+            # 각 텐서에 가중치 적용
+            for dims_key in shared_up:
+                dims_str = str(dims_key)
+                if dims_str in self.share_up_weights:
+                    shared_up[dims_key] = self.share_up_weights[dims_str](shared_up[dims_key])
+                else:
+                    print(f"Warning: Missing up-weight for {dims_key}, using original values")
+            
+            # 2. 방향성 처리 (방향 차원이 있는 텐서만)
+            for dims_key in shared_up:
+                dims = list(dims_key)
+                if len(dims) > 2 and dims[2] == 1:  # 방향 차원이 있는 경우 (인덱스 유효성 검사)
+                    # 방향성 처리 적용
+                    shared_up[dims_key] = F.gelu(shared_up[dims_key])
+            
+            # 3. 하향 공유 (상위->하위 텐서)
+            shared_down = share_information(shared_up, direction='down')
+            
+            # 각 텐서에 가중치 적용
+            for dims_key in shared_down:
+                dims_str = str(dims_key)
+                if dims_str in self.share_down_weights:
+                    shared_down[dims_key] = self.share_down_weights[dims_str](shared_down[dims_key])
+                else:
+                    print(f"Warning: Missing down-weight for {dims_key}, using original values")
+            
+            # 4. 정규화
+            normalized = multitensor_normalize(shared_down)
+            
+            return normalized
+            
+        except Exception as e:
+            print(f"Error in process_latent_tensors: {e}")
+            # 오류 발생 시 원본 잠재 벡터 그대로 반환
+            return {
+                tuple(dims): self.multitensor_latent.get_latent(dims)
+                for dims in self.multitensor_latent.dims_list
+            }
     
     def combine_latents(self, processed_latents):
         """
         처리된 다중 텐서 잠재 벡터를 단일 벡터로 결합
         """
-        # 주요 잠재 벡터 선택 (가장 많은 차원을 가진 것)
-        main_dims = max(processed_latents.keys(), key=sum)
-        main_latent = processed_latents[main_dims]
-        
-        # 투영 레이어 생성 또는 가져오기
-        if not hasattr(self, '_projection_layers'):
-            self._projection_layers = {}
-        
-        # 다른 잠재 벡터의 정보를 결합
-        for dims_key, latent in processed_latents.items():
-            if dims_key != main_dims:
-                # 투영 레이어 생성 또는 가져오기
-                dims_str = str(dims_key) + "_to_" + str(main_dims)
-                if dims_str not in self._projection_layers:
-                    self._projection_layers[dims_str] = nn.Linear(
-                        self.multitensor_latent.get_hidden_size(list(dims_key)),
-                        self.multitensor_latent.get_hidden_size(list(main_dims))
-                    ).to(self.device)
+        try:
+            if not processed_latents:  # 빈 사전인 경우 처리
+                print("Warning: Empty processed_latents dictionary. Using default latent.")
+                return torch.zeros(1, self.hidden_size, device=self.device)
+            
+            # 주요 잠재 벡터 선택 (가장 많은 차원을 가진 것)
+            try:
+                main_dims = max(processed_latents.keys(), key=sum)
+            except Exception as e:
+                print(f"Error selecting main dimensions: {e}")
+                main_dims = next(iter(processed_latents.keys()))  # 첫 번째 키 사용
                 
-                # 투영 후 결합
-                projected = self._projection_layers[dims_str](latent)
-                main_latent = main_latent + 0.1 * projected
-        
-        return main_latent
+            main_latent = processed_latents[main_dims].clone()  # 복사본 사용
+            
+            # 투영 레이어 생성 또는 가져오기
+            if not hasattr(self, '_projection_layers'):
+                self._projection_layers = {}
+            
+            # 다른 잠재 벡터의 정보를 결합
+            for dims_key, latent in processed_latents.items():
+                if dims_key != main_dims:
+                    try:
+                        # 투영 레이어 생성 또는 가져오기
+                        dims_str = str(dims_key) + "_to_" + str(main_dims)
+                        
+                        if dims_str not in self._projection_layers:
+                            source_size = self.multitensor_latent.get_hidden_size(list(dims_key))
+                            target_size = self.multitensor_latent.get_hidden_size(list(main_dims))
+                            
+                            self._projection_layers[dims_str] = nn.Linear(
+                                source_size, target_size
+                            ).to(self.device)
+                        
+                        # 투영 후 결합 (가중치 적용)
+                        projected = self._projection_layers[dims_str](latent)
+                        main_latent = main_latent + 0.1 * projected
+                    except Exception as e:
+                        print(f"Error projecting dimension {dims_key}: {e}")
+                        continue  # 해당 차원 건너뛰기
+            
+            return main_latent
+            
+        except Exception as e:
+            print(f"Error in combine_latents: {e}")
+            # 오류 발생 시 기본 잠재 벡터 반환
+            return torch.zeros(1, self.hidden_size, device=self.device)
     
     def optimize_multi_latent(self, input_grid, target_grid, examples=None, num_iterations=100):
         """
