@@ -237,6 +237,19 @@ class LlamaARCSolver:
                         print(f"Error projecting dimension {dims_key}: {e}")
                         continue  # 해당 차원 건너뛰기
             
+            # 최종 결과가 모델의 hidden_size와 일치하는지 확인하고 필요시 조정
+            if main_latent.shape[-1] != self.hidden_size:
+                print(f"Adjusting latent dimension from {main_latent.shape[-1]} to {self.hidden_size}")
+                
+                # 임베딩 크기에 맞게 투영 레이어 생성
+                if not hasattr(self, '_final_projection'):
+                    self._final_projection = nn.Linear(
+                        main_latent.shape[-1], self.hidden_size
+                    ).to(self.device)
+                
+                # 최종 크기 조정
+                main_latent = self._final_projection(main_latent)
+            
             return main_latent
             
         except Exception as e:
@@ -286,7 +299,25 @@ class LlamaARCSolver:
             inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
             
             # 결합된 잠재 벡터를 임베딩에 주입 (첫 토큰에만 적용)
-            inputs_embeds[:, 0, :] += combined_latent
+            try:
+                # 차원 확인 및 조정
+                if inputs_embeds[:, 0, :].shape[-1] != combined_latent.shape[-1]:
+                    print(f"Warning: Shape mismatch between embeddings {inputs_embeds[:, 0, :].shape} and latent {combined_latent.shape}")
+                    # 임시 해결책: 더 작은 차원으로 자르거나 0으로 패딩
+                    if inputs_embeds[:, 0, :].shape[-1] > combined_latent.shape[-1]:
+                        # 패딩 필요
+                        pad_size = inputs_embeds[:, 0, :].shape[-1] - combined_latent.shape[-1]
+                        padding = torch.zeros(combined_latent.shape[0], pad_size, device=self.device)
+                        combined_latent = torch.cat([combined_latent, padding], dim=-1)
+                    else:
+                        # 잘라내기 필요
+                        combined_latent = combined_latent[:, :inputs_embeds.shape[-1]]
+                
+                # 잠재 벡터 주입
+                inputs_embeds[:, 0, :] += combined_latent
+            except Exception as e:
+                print(f"Error injecting latent vector: {e}")
+                # 오류 발생 시 잠재 벡터 주입 건너뛰기
             
             # 모델 출력
             outputs = self.model(
@@ -318,7 +349,26 @@ class LlamaARCSolver:
                 with torch.no_grad():
                     combined_latent = self.combine_latents(processed_latents)
                     inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
-                    inputs_embeds[:, 0, :] += combined_latent
+                    
+                    try:
+                        # 차원 확인 및 조정
+                        if inputs_embeds[:, 0, :].shape[-1] != combined_latent.shape[-1]:
+                            print(f"Warning: Shape mismatch between embeddings {inputs_embeds[:, 0, :].shape} and latent {combined_latent.shape}")
+                            # 임시 해결책: 더 작은 차원으로 자르거나 0으로 패딩
+                            if inputs_embeds[:, 0, :].shape[-1] > combined_latent.shape[-1]:
+                                # 패딩 필요
+                                pad_size = inputs_embeds[:, 0, :].shape[-1] - combined_latent.shape[-1]
+                                padding = torch.zeros(combined_latent.shape[0], pad_size, device=self.device)
+                                combined_latent = torch.cat([combined_latent, padding], dim=-1)
+                            else:
+                                # 잘라내기 필요
+                                combined_latent = combined_latent[:, :inputs_embeds.shape[-1]]
+                        
+                        # 잠재 벡터 주입
+                        inputs_embeds[:, 0, :] += combined_latent
+                    except Exception as e:
+                        print(f"Error injecting latent vector for best solution: {e}")
+                        # 오류 발생 시 잠재 벡터 주입 건너뛰기
                     
                     gen_outputs = self.model.generate(
                         inputs_embeds=inputs_embeds,
@@ -404,7 +454,26 @@ class LlamaARCSolver:
         # 입력 임베딩에 잠재 벡터 주입
         with torch.no_grad():
             inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)
-            inputs_embeds[:, 0, :] += combined_latent
+            
+            try:
+                # 차원 확인 및 조정
+                if inputs_embeds[:, 0, :].shape[-1] != combined_latent.shape[-1]:
+                    print(f"Warning: Shape mismatch between embeddings {inputs_embeds[:, 0, :].shape} and latent {combined_latent.shape}")
+                    # 임시 해결책: 더 작은 차원으로 자르거나 0으로 패딩
+                    if inputs_embeds[:, 0, :].shape[-1] > combined_latent.shape[-1]:
+                        # 패딩 필요
+                        pad_size = inputs_embeds[:, 0, :].shape[-1] - combined_latent.shape[-1]
+                        padding = torch.zeros(combined_latent.shape[0], pad_size, device=self.device)
+                        combined_latent = torch.cat([combined_latent, padding], dim=-1)
+                    else:
+                        # 잘라내기 필요
+                        combined_latent = combined_latent[:, :inputs_embeds.shape[-1]]
+                
+                # 잠재 벡터 주입
+                inputs_embeds[:, 0, :] += combined_latent
+            except Exception as e:
+                print(f"Error injecting latent vector in solve_with_multi_latent: {e}")
+                # 오류 발생 시 잠재 벡터 주입 건너뛰기
             
             # 출력 생성
             outputs = self.model.generate(
